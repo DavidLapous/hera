@@ -715,6 +715,13 @@ namespace md {
     R matching_distance(const ModulePresentation<R>& mod_a, const ModulePresentation<R>& mod_b,
             CalculationParams<R>& params)
     {
+        if (mod_a == mod_b) {
+            params.actual_error = 0.0;
+            params.actual_max_depth = 0;
+            params.n_hera_calls = 0;
+            return 0.0;
+        }
+
         DistanceCalculator<R, ModulePresentation<R>> runner(mod_a, mod_b, params);
         R result = runner.distance();
         params.n_hera_calls = runner.get_hera_calls_number();
