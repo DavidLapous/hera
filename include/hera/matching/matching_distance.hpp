@@ -1,3 +1,9 @@
+#ifdef MD_USE_TBB
+#include <exception>
+#include <tbb/parallel_for.h>
+#include <tbb/task_arena.h>
+#endif
+
 namespace md {
 
     template<class R, class T>
@@ -399,8 +405,14 @@ namespace md {
 
         R new_value = distance_on_line(central_line);
         n_hera_calls_per_level_[dual_cell.level() + 1]++;
-        dual_cell.set_value_at(ValuePoint::center, new_value);
         params_.actual_max_depth = std::max(params_.actual_max_depth, dual_cell.level() + 1);
+        set_cell_central_value(dual_cell, new_value);
+    }
+
+    template<class R, class T>
+    void DistanceCalculator<R, T>::set_cell_central_value(CellWithValue<R>& dual_cell, R new_value)
+    {
+        dual_cell.set_value_at(ValuePoint::center, new_value);
 
 #ifdef PRINT_HEAT_MAP
         if (params_.bound_strategy == BoundStrategy::bruteforce) {
@@ -521,7 +533,66 @@ namespace md {
 
         std::vector<UbExperimentRecord> ub_experiment_results;
 
+#ifdef MD_USE_TBB
+        const bool parallel_breadth_first =
+                (params_.traverse_strategy == TraverseStrategy::breadth_first ||
+                 params_.traverse_strategy == TraverseStrategy::breadth_first_value) &&
+                params_.n_jobs != 1;
+        const int requested_concurrency = params_.n_jobs <= 0 ? tbb::task_arena::automatic : params_.n_jobs;
+        tbb::task_arena arena(requested_concurrency);
+        int arena_concurrency = 1;
+        if (parallel_breadth_first) {
+            arena.execute([&] { arena_concurrency = tbb::this_task_arena::max_concurrency(); });
+        }
+        CellValueVector prefetched_cells;
+        std::vector<R> prefetched_values;
+        std::vector<char> prefetched_has_value;
+        std::vector<std::exception_ptr> prefetched_exceptions;
+        std::size_t prefetched_index = 0;
+#endif
+
         while(not dual_cells_queue.empty()) {
+
+#ifdef MD_USE_TBB
+            if (parallel_breadth_first && arena_concurrency > 1 && prefetched_index == prefetched_cells.size()) {
+                prefetched_cells.clear();
+                prefetched_values.clear();
+                prefetched_has_value.clear();
+                prefetched_exceptions.clear();
+                prefetched_index = 0;
+
+                const int batch_level = dual_cells_queue.top().level();
+                while (!dual_cells_queue.empty() && dual_cells_queue.top().level() == batch_level &&
+                        static_cast<int>(prefetched_cells.size()) < arena_concurrency) {
+                    prefetched_cells.push_back(dual_cells_queue.top());
+                    dual_cells_queue.pop();
+                }
+
+                prefetched_values.resize(prefetched_cells.size());
+                prefetched_has_value.resize(prefetched_cells.size(), true);
+                prefetched_exceptions.resize(prefetched_cells.size());
+                for (std::size_t i = 0; i < prefetched_cells.size(); ++i) {
+                    if (not params_.stop_asap && params_.bound_strategy != BoundStrategy::bruteforce) {
+                        prefetched_has_value[i] = prefetched_cells[i].stored_upper_bound() >
+                                (1.0 + params_.delta) * lower_bound;
+                    }
+                }
+                arena.execute([&] {
+                    tbb::parallel_for(std::size_t(0), prefetched_cells.size(), [&](std::size_t i) {
+                        if (prefetched_has_value[i]) {
+                            try {
+                                prefetched_values[i] = distance_on_line_const(prefetched_cells[i].center());
+                            } catch (...) {
+                                prefetched_exceptions[i] = std::current_exception();
+                            }
+                        }
+                    });
+                });
+                for (std::size_t i = 0; i < prefetched_cells.size(); ++i) {
+                    dual_cells_queue.push(prefetched_cells[i]);
+                }
+            }
+#endif
 
             CellWithValue<R> dual_cell = dual_cells_queue.top();
             dual_cells_queue.pop();
@@ -544,6 +615,19 @@ namespace md {
                 }
             }
 
+#ifdef MD_USE_TBB
+            bool has_prefetched_value = false;
+            R prefetched_value = 0;
+            std::exception_ptr prefetched_exception;
+            if (prefetched_index < prefetched_cells.size()) {
+                assert(dual_cell.center() == prefetched_cells[prefetched_index].center());
+                has_prefetched_value = prefetched_has_value[prefetched_index];
+                prefetched_value = prefetched_values[prefetched_index];
+                prefetched_exception = prefetched_exceptions[prefetched_index];
+                ++prefetched_index;
+            }
+#endif
+
             if (discard_cell) {
                 n_cells_discarded[dual_cell.level()]++;
                 continue;
@@ -551,7 +635,17 @@ namespace md {
 
             // until now, dual_cell knows its value in one of its corners
             // new_value will be the weighted distance at its center
-            set_cell_central_value(dual_cell);
+#ifdef MD_USE_TBB
+            if (has_prefetched_value) {
+                ++n_hera_calls_;
+                if (prefetched_exception)
+                    std::rethrow_exception(prefetched_exception);
+                n_hera_calls_per_level_[dual_cell.level() + 1]++;
+                params_.actual_max_depth = std::max(params_.actual_max_depth, dual_cell.level() + 1);
+                set_cell_central_value(dual_cell, prefetched_value);
+            } else
+#endif
+                set_cell_central_value(dual_cell);
             R new_value = dual_cell.value_at(ValuePoint::center);
             lower_bound = std::max(new_value, lower_bound);
 
