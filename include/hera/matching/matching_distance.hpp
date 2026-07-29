@@ -255,19 +255,21 @@ namespace md {
     R DistanceCalculator<R, T>::get_upper_bound(const CellWithValue<R>& dual_cell, R good_enough_ub) const
     {
         assert(good_enough_ub >= 0);
+        const R approximation_factor = 1 + std::max(R(0), params_.hera_epsilon);
 
         switch(params_.bound_strategy) {
             case BoundStrategy::bruteforce:
                 return std::numeric_limits<R>::max();
 
             case BoundStrategy::local_dual_bound:
-                return dual_cell.min_value() + get_local_dual_bound(dual_cell.dual_box());
+                return approximation_factor * dual_cell.min_value() + get_local_dual_bound(dual_cell.dual_box());
 
             case BoundStrategy::local_dual_bound_refined:
-                return dual_cell.min_value() + get_local_refined_bound(dual_cell.dual_box());
+                return approximation_factor * dual_cell.min_value() + get_local_refined_bound(dual_cell.dual_box());
 
             case BoundStrategy::local_combined: {
-                R cheap_upper_bound = dual_cell.min_value() + get_local_refined_bound(dual_cell.dual_box());
+                R cheap_upper_bound = approximation_factor * dual_cell.min_value()
+                        + get_local_refined_bound(dual_cell.dual_box());
                 if (cheap_upper_bound < good_enough_ub) {
                     return cheap_upper_bound;
                 } else {
@@ -285,17 +287,18 @@ namespace md {
                     R base_value = dual_cell.value_at(vp);
                     R bound_dgm_a = get_single_dgm_bound(dual_cell, vp, 0, good_enough_ub);
 
-                    if (params_.stop_asap and bound_dgm_a + base_value >= good_enough_ub) {
+                    if (params_.stop_asap and bound_dgm_a + approximation_factor * base_value >= good_enough_ub) {
                         // we want to return a valid upper bound, not just something that will prevent discarding the cell
                         // and we don't want to compute pushes for points in second bifiltration.
                         // so just return a constant time bound
-                        return dual_cell.min_value() + get_local_refined_bound(dual_cell.dual_box());
+                        return approximation_factor * dual_cell.min_value()
+                                + get_local_refined_bound(dual_cell.dual_box());
                     }
 
                     R bound_dgm_b = get_single_dgm_bound(dual_cell, vp, 1,
                             std::max(R(0), good_enough_ub - bound_dgm_a));
 
-                    result = std::min(result, base_value + bound_dgm_a + bound_dgm_b);
+                    result = std::min(result, approximation_factor * base_value + bound_dgm_a + bound_dgm_b);
 
                     if (params_.stop_asap and result < good_enough_ub) {
                         break;
